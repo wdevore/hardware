@@ -9,10 +9,12 @@ type Pin uint
 const (
 	// NoPin indicates no pin is to be used
 	NoPin Pin = 100001
+	// Manual requests manual control of CS
+	Manual Pin = 100002
 	// DefaultPin indicates that a default pin be used.
-	DefaultPin Pin = iota
+	DefaultPin Pin = 100003
 	// HardwarePin indicates that the device will control the pin instead of software
-	HardwarePin
+	HardwarePin Pin = 100004
 )
 
 // PinConfiguration specifies a pin configuration

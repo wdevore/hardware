@@ -46,6 +46,13 @@ const (
 	RDID2   = 0xDB
 	RDID3   = 0xDC
 	RDID4   = 0xDD
+
+	// Typically for the S version
+	GAMMA1  = 0xE0 // Gamma sequence 1
+	GAMMA2  = 0xE1 // Gamma sequence 2
+	TESTCMD = 0xF0 // test command
+	RAMPWR  = 0xF6 // Ram power save mode
+
 	PWCTR6  = 0xFC
 	GMCTRP1 = 0xE0
 	GMCTRN1 = 0xE1
@@ -78,14 +85,18 @@ type ST7735 struct {
 	colstart byte
 	rowstart byte
 
-	dc    gpio.Pin // Data/Command pin
-	reset gpio.Pin
+	dc        gpio.Pin // Data/Command pin
+	reset     gpio.Pin
+	backlight gpio.Pin
 
 	tab        devices.TabColor
 	dimensions devices.Dimensions
 
-	Width  byte
-	Height byte
+	Width  int
+	Height int
+
+	colorOder           devices.ColorOrder
+	memoryAccessRegData byte
 
 	// In general each word is an RGB (565) of 2 bytes each.
 	// High byte followed by Low byte
@@ -116,11 +127,12 @@ type commando struct {
 // Initialize configures FTDI and SPI, and initializes ST7735
 // Vendor/Product example would be: 0x0403, 0x06014
 // A clock frequency of 0 means default to max = 30MHz
-func (st *ST7735) initialize(vender, product, clockFreq int, chipSelect gpio.Pin) error {
+func (st *ST7735) initialize(vender, product, clockFreq int, chipSelect gpio.Pin, colorOrder devices.ColorOrder) error {
+	st.colorOder = colorOrder
 
 	// Create a SPI interface from the FT232H
 	st.spi = spi.NewSPI(vender, product, false)
-	st.spi.DebugInit()
+	// st.spi.EnableTrigger()
 
 	if st.spi == nil {
 		return errors.New("ST7735 failed to create SPI object")
@@ -165,7 +177,7 @@ func (st *ST7735) commonInit(cmdList []commando) error {
 
 	sp := st.spi
 
-	// The ST7735 communicates with TFT device (aka ST7735R device) through the FTDI235H device
+	// The ST7735 communicates with TFT device (aka ST7735R/S device) through the FTDI235H device
 	// via the SPI protocol. However, the SPI protocol only accounts for, at most, 4 pins, anything
 	// else needs to added manually--and controlled manually.
 
@@ -184,13 +196,13 @@ func (st *ST7735) commonInit(cmdList []commando) error {
 		fi.ConfigPin(st.reset, gpio.Output)
 
 		fi.OutputHigh(st.reset)
-		time.Sleep(time.Millisecond * 500)
+		time.Sleep(time.Millisecond * 100)
 
 		fi.OutputLow(st.reset)
-		time.Sleep(time.Millisecond * 500)
+		time.Sleep(time.Millisecond * 100)
 
 		fi.OutputHigh(st.reset)
-		time.Sleep(time.Millisecond * 500)
+		time.Sleep(time.Millisecond * 100)
 	}
 
 	if cmdList != nil {
@@ -232,27 +244,36 @@ func (st *ST7735) issueCommands(cmdList []commando) {
 func (st *ST7735) SetRotation(orieo devices.RotationMode) {
 	st.WriteCommand(MADCTL)
 
+	cOrder := byte(MadctlRGB)
+
+	if st.colorOder == devices.BGROrder {
+		cOrder = MadctlBGR
+	}
+
+	st.colstart = 2
+	st.rowstart = 1
+
 	switch orieo {
 	case devices.Orientation0:
-		st.WriteData(MadctlMX | MadctlMY | MadctlBGR)
+		st.WriteData(MadctlMX | MadctlMY | cOrder)
 		st.rowstart = 32
 		st.xstart = st.colstart
 		st.ystart = st.rowstart
 		break
 	case devices.Orientation1:
-		st.WriteData(MadctlMY | MadctlMV | MadctlBGR)
+		st.WriteData(MadctlMY | MadctlMV | cOrder)
 		st.rowstart = 32
 		st.ystart = st.colstart
 		st.xstart = st.rowstart
 		break
 	case devices.Orientation2:
-		st.WriteData(MadctlBGR)
+		st.WriteData(cOrder)
 		st.rowstart = 1
 		st.xstart = st.colstart
 		st.ystart = st.rowstart
 		break
 	case devices.Orientation3:
-		st.WriteData(MadctlMX | MadctlMV | MadctlBGR)
+		st.WriteData(MadctlMX | MadctlMV | cOrder)
 		st.rowstart = 0
 		st.ystart = st.colstart
 		st.xstart = st.rowstart
@@ -267,6 +288,26 @@ func (st *ST7735) InvertDisplay(inv bool) {
 	} else {
 		st.WriteCommand(INVOFF)
 
+	}
+}
+
+// EnableBacklightControl configures a pin for backlight control (default = high)
+func (st *ST7735) EnableBacklightControl(pin gpio.Pin) {
+	pins := []gpio.PinConfiguration{
+		{Pin: pin, Direction: gpio.Output, Value: gpio.High},
+	}
+	st.backlight = pin
+	st.spi.ConfigurePins(pins)
+}
+
+// BacklightOn turns on or off back light
+func (st *ST7735) BacklightOn(on bool) {
+	sp := st.spi
+	fi := sp.GetFTDI()
+	if on {
+		fi.OutputHigh(st.backlight)
+	} else {
+		fi.OutputLow(st.backlight)
 	}
 }
 
@@ -327,6 +368,36 @@ func (st *ST7735) WriteDataChunk(data []byte) {
 }
 
 // ----------------------------------------------------
+// Graphics Buffered (Preferred)
+// ----------------------------------------------------
+
+// Blit writes the contents of the displayBuffer directly to the display as fast as it can!
+// At time of writing could be improved for speed by going directly to SPI interface
+// itself but for now fast enough doing it this way for most needs
+func (st *ST7735) Blit(buffer []byte) {
+	// writes the contents of the buffer directly to the display as fast as it can!
+	// At time of writing could be improved for speed by going directly to SPI interface
+	// itself but for now fast enough doing it this way for most needs
+
+	// Because we are only ever writing the screen buffer we do not need to set
+	// a screen start location as by default after a reset it will be 0,0 and after
+	// a full buffer write it will reset back to this. If you decide to extend this
+	// code by doing partial buffer writes then you will need to set the start location
+	// to 0,0 using the following line (uncomment if needed)
+	//  st.SetAddrWindow(0,0,1,1);
+	// st.spi.TriggerPulse()
+
+	sp := st.spi
+	fi := sp.GetFTDI()
+
+	st.SetAddrWindow(0, 0, byte(st.Width-1), byte(st.Height-1))
+
+	fi.OutputHigh(st.dc)
+
+	sp.Write(buffer)
+}
+
+// ----------------------------------------------------
 // Graphics Unbuffered
 // ----------------------------------------------------
 
@@ -339,24 +410,10 @@ func (st *ST7735) SetAddrWindow(x0, y0, x1, y1 byte) {
 	addWindowBuf[3] = x1 + st.xstart
 	st.WriteDataChunk(addWindowBuf)
 
-	// st.WriteDataChunk([]byte{0x00, x0 + st.xstart, 0x00, x1 + st.xstart})
-
-	// st.WriteData(0x00)
-	// st.WriteData(x0 + st.xstart) // XSTART
-	// st.WriteData(0x00)
-	// st.WriteData(x1 + st.xstart) // XEND
-
 	st.WriteCommand(RASET) // Row addr set
 	addWindowBuf[1] = y0 + st.ystart
 	addWindowBuf[3] = y1 + st.ystart
 	st.WriteDataChunk(addWindowBuf)
-
-	// st.WriteDataChunk([]byte{0x00, y0 + st.ystart, 0x00, y1 + st.ystart})
-
-	// st.WriteData(0x00)
-	// st.WriteData(y0 + st.ystart) // YSTART
-	// st.WriteData(0x00)
-	// st.WriteData(y1 + st.ystart) // YEND
 
 	st.WriteCommand(RAMWR) // write to RAM
 }
@@ -384,7 +441,7 @@ func (st *ST7735) PushColor(color uint16) {
 // DrawPixel draws to device only.
 func (st *ST7735) DrawPixel(x, y byte, color uint16) {
 
-	if (x < 0) || (x > st.Width) || (y < 0) || (y > st.Height) {
+	if (x < 0) || (x > byte(st.Width)) || (y < 0) || (y > byte(st.Height)) {
 		return
 	}
 
@@ -407,13 +464,13 @@ func (st *ST7735) DrawPixel(x, y byte, color uint16) {
 func (st *ST7735) DrawFastVLine(x, y, h byte, color uint16) {
 
 	// Rudimentary clipping
-	if (x > st.Width) || (y > st.Height) {
+	if (x > byte(st.Width)) || (y > byte(st.Height)) {
 		log.Println("DrawFastVLine: Rejected x,y")
 		return
 	}
 
-	if (y + h - 1) > st.Height {
-		h = st.Height - y
+	if (y + h - 1) > byte(st.Height) {
+		h = byte(st.Height) - y
 	}
 
 	st.SetAddrWindow(x, y, x, y+h-1)
@@ -436,13 +493,13 @@ func (st *ST7735) DrawFastVLine(x, y, h byte, color uint16) {
 func (st *ST7735) DrawFastHLine(x, y, w byte, color uint16) {
 
 	// Rudimentary clipping
-	if (x > st.Width) || (y > st.Height) {
+	if (x > byte(st.Width)) || (y > byte(st.Height)) {
 		log.Println("DrawFastHLine: Rejected x,y")
 		return
 	}
 
-	if (x + w - 1) > st.Width {
-		w = st.Width - x
+	if (x + w - 1) > byte(st.Width) {
+		w = byte(st.Width) - x
 	}
 
 	st.SetAddrWindow(x, y, x+w-1, y)
@@ -463,7 +520,7 @@ func (st *ST7735) DrawFastHLine(x, y, w byte, color uint16) {
 
 // FillScreen fills the entire display area with "color"
 func (st *ST7735) FillScreen(color uint16) {
-	st.FillRectangle(0, 0, st.Width, st.Height, color)
+	st.FillRectangle(0, 0, byte(st.Width), byte(st.Height), color)
 }
 
 // deprecated (old) FillRectangle2 fills a rectangle
@@ -518,17 +575,17 @@ func (st *ST7735) FillScreen(color uint16) {
 func (st *ST7735) FillRectangle(x, y, w, h byte, color uint16) {
 	// log.Printf("%d x %d\n", st.Width, st.Height)
 	// rudimentary clipping (drawChar w/big text requires this)
-	if (x > st.Width) || (y > st.Height) {
+	if (x > byte(st.Width)) || (y > byte(st.Height)) {
 		// log.Println("FillRectangle Rejected rectangle x,y")
 		return
 	}
-	if (x + w - 1) > st.Width {
+	if (x + w - 1) > byte(st.Width) {
 		// log.Println("ST7735 FillRectangle: adjusting w")
-		w = st.Width - x
+		w = byte(st.Width) - x
 	}
-	if (y + h - 1) > st.Height {
+	if (y + h - 1) > byte(st.Height) {
 		// log.Println("ST7735 FillRectangle: adjusting h")
-		h = st.Height - y
+		h = byte(st.Height) - y
 	}
 
 	st.SetAddrWindow(x, y, x+w-1, y+h-1)
@@ -543,132 +600,6 @@ func (st *ST7735) FillRectangle(x, y, w, h byte, color uint16) {
 			colorPush[0] = byte((color >> 8) & 0xff)
 			colorPush[1] = byte(color & 0xff)
 			sp.Write(colorPush)
-		}
-	}
-}
-
-// ----------------------------------------------------
-// Graphics Buffered (Preferred)
-// ----------------------------------------------------
-
-// Blit writes the contents of the displayBuffer directly to the display as fast as it can!
-// At time of writing could be improved for speed by going directly to SPI interface
-// itself but for now fast enough doing it this way for most needs
-func (st *ST7735) Blit() {
-	// writes the contents of the buffer directly to the display as fast as it can!
-	// At time of writing could be improved for speed by going directly to SPI interface
-	// itself but for now fast enough doing it this way for most needs
-
-	// Because we are only ever writing the screen buffer we do not need to set
-	// a screen start location as by default after a reset it will be 0,0 and after
-	// a full buffer write it will reset back to this. If you decide to extend this
-	// code by doing partial buffer writes then you will need to set the start location
-	// to 0,0 using the following line (uncomment if needed)
-	//  st.SetAddrWindow(0,0,1,1);
-	// st.spi.TriggerPulse()
-
-	sp := st.spi
-	fi := sp.GetFTDI()
-
-	st.SetAddrWindow(0, 0, st.Width-1, st.Height-1)
-
-	fi.OutputHigh(st.dc)
-
-	sp.Write(st.pushBuffer)
-}
-
-// DrawPixelToBuf draws to screen buffer only. You will need to eventually
-// call Blit() to see anything.
-func (st *ST7735) DrawPixelToBuf(x, y byte, color uint16) {
-
-	if (x < 0) || (x > st.Width) || (y < 0) || (y > st.Height) {
-		return
-	}
-
-	// write to screen buffer memory instead, this is quick and dirty, presumes always using
-	// RGB565 (16bit per pixel colour)
-	// Calculate memory location based on screen width and height
-	bufOff := int(y)*int(st.Height) + int(x)
-	st.pushBuffer[bufOff*2] = byte(color >> 8 & 0xff) // High
-	st.pushBuffer[bufOff*2+1] = byte(color & 0xff)    // Low
-}
-
-// DrawVLineToBuf draws a vertical line
-func (st *ST7735) DrawVLineToBuf(x, y, h byte, color uint16) {
-
-	// Rudimentary clipping
-	if (x > st.Width) || (y > st.Height) {
-		return
-	}
-
-	msb := byte((color >> 8) & 0xff) // High
-	lsb := byte(color & 0xff)        // Low
-
-	for iy := y; iy < y+h; iy++ {
-		bufOff := int(iy)*int(st.Height) + int(x)
-
-		st.pushBuffer[bufOff*2] = msb
-		st.pushBuffer[bufOff*2+1] = lsb
-	}
-}
-
-// DrawHLineToBuf draws a horizontal line
-func (st *ST7735) DrawHLineToBuf(x, y, w byte, color uint16) {
-
-	// Rudimentary clipping
-	if (x > st.Width) || (y > st.Height) {
-		return
-	}
-
-	msb := byte((color >> 8) & 0xff) // High
-	lsb := byte(color & 0xff)        // Low
-
-	for ix := x; ix < x+w; ix++ {
-		bufOff := int(y)*int(st.Height) + int(ix)
-
-		st.pushBuffer[bufOff*2] = msb
-		st.pushBuffer[bufOff*2+1] = lsb
-	}
-}
-
-// FillScreenToBuf fills the entire display area with "color"
-func (st *ST7735) FillScreenToBuf(color uint16) {
-	st.FillRectangleToBuf(0, 0, st.Width, st.Height, color)
-}
-
-// FillRectangleToBuf fills a rectangle in the screen buffer
-func (st *ST7735) FillRectangleToBuf(x, y, w, h byte, color uint16) {
-	// log.Printf("%d x %d\n", st.Width, st.Height)
-	// rudimentary clipping (drawChar w/big text requires this)
-	if (x > st.Width) || (y > st.Height) {
-		// log.Println("FillRectangle Rejected rectangle x,y")
-		return
-	}
-
-	sw := int(x + w)
-	sh := int(y + h)
-	if (sw > int(st.Width)) || (sh > int(st.Height)) {
-		// log.Println("FillRectangle Rejected rectangle x,y")
-		return
-	}
-
-	msb := byte((color >> 8) & 0xff)
-	lsb := byte(color & 0xff)
-
-	j := 0
-	ih := int(st.Height)
-	pl := len(st.pushBuffer)
-
-	// log.Printf("%d,%d\n", sw, sh)
-fillLoop:
-	for sy := int(y); sy < sh; sy++ {
-		for sx := int(x); sx < sw; sx++ {
-			j = int(sy)*ih + int(sx)
-			if j > pl {
-				break fillLoop
-			}
-			st.pushBuffer[j*2] = msb
-			st.pushBuffer[j*2+1] = lsb
 		}
 	}
 }

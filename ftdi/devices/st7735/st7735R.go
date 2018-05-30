@@ -197,9 +197,9 @@ func NewST7735R(dataCommand, reset gpio.Pin, tab devices.TabColor, dimensions de
 // decreasing y moves up
 // Thus the origin is in the top-left
 // 3 = right to left
-func (st *ST7735R) Initialize(vender, product, clockFreq int, chipSelect gpio.Pin, orientation devices.RotationMode) error {
+func (st *ST7735R) Initialize(vender, product, clockFreq int, chipSelect gpio.Pin, orientation devices.RotationMode, colorOder devices.ColorOrder) error {
 	// Initialize the ST7735 device
-	err := st.initialize(vender, product, clockFreq, chipSelect)
+	err := st.initialize(vender, product, clockFreq, chipSelect, colorOder)
 	if err != nil {
 		return err
 	}

@@ -1,9 +1,5 @@
 package devices
 
-import (
-	"math"
-)
-
 /*
 	The "tab"s issue:
 	The TFT displays are shipped with protective films that also include a
@@ -36,11 +32,19 @@ type Dimensions int
 
 const (
 	// D128x128 = 128 by 128 pixels
-	D128x128 = 0
+	D128x128 = iota
 	// D128x160 = 128 by 160 pixels
-	D128x160 = 1
+	D128x160 // Typically an ST7735S device
+	D160x128 // Typically an ST7735S device
 	// D160x80 = 160 by 80 pixels
-	D160x80 = 2
+	D128x96
+	D160x80
+
+	D320x480 // 320w by 480h = portrait
+	D480x320 // landscape
+
+	D480x272
+	D800x480
 )
 
 const (
@@ -48,27 +52,6 @@ const (
 	Min450Hz = 450
 	// Max30MHz is the  maximum clock speed
 	Max30MHz = 30000000
-)
-
-var (
-	// Basic Color definitions
-	//   R      G     B  = 5,6,5
-	// ----- ------ -----
-
-	BLACK uint16 = 0x0000
-	WHITE uint16 = 0xFFFF
-
-	// 0000 0000 0001 1111   == 001f
-	BLUE  uint16 = 0x001F
-	RED   uint16 = 0xF800
-	GREEN uint16 = 0x07E0
-
-	CYAN      = RGBtoRGB565(0, 255, 255) //0x07FF
-	MAGENTA   = RGBtoRGB565(255, 0, 255) //0xF81F
-	YELLOW    = RGBtoRGB565(255, 255, 0) //0xFFE0
-	ORANGE    = RGBtoRGB565(255, 127, 0)
-	GREY      = RGBtoRGB565(127, 127, 127)
-	LightGREY = RGBtoRGB565(200, 200, 200)
 )
 
 const (
@@ -93,31 +76,11 @@ const (
 	OrientationDefault
 )
 
-// RGBtoRGB565 converts an 8-bit (each) R,G,B into a 16-bit packed color
-// formatted as 5-6-5.
-// Each 8bits are interpolated down to 5 or 6 bits.
-// 2^5 = 32 shades of Red
-// 2^6 = 64 shades of Green
-// 2^5 = 32 shades of Blue
-func RGBtoRGB565(r, g, b int) uint16 {
-	// 16 bits:
-	//   R      G     B
-	// 00000 000000 00000
+// ColorOrder :some of the devices have the SRGB pin tied either high/true (BGR) or low/false (RGB)
+// If your colors are incorrect pass a different byteOrder
+type ColorOrder int
 
-	// Interpolate 8-8-8 values to 5-6-5 values
-	lr := lerp(31.0, 255.0, float64(r)) // 8bit to 5bit
-	lg := lerp(63.0, 255.0, float64(g)) // 8bit to 6bit
-	lb := lerp(31.0, 255.0, float64(b)) // 8bit to 5bit
-
-	// Shift them into their new positions.
-	var c = uint16(lr) << 11
-	c |= uint16(lg) << 5
-	c |= uint16(lb)
-
-	return c
-}
-
-func lerp(x1, y1, y float64) float64 {
-	x := x1 / y1 * y
-	return math.Round(x)
-}
+const (
+	RGBOrder = iota
+	BGROrder
+)

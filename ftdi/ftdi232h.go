@@ -172,6 +172,30 @@ func (f *FTDI232H) Configure(sleepingPoll bool) error {
 	return nil
 }
 
+// SoftConfigure sets default values for BitBang.
+func (f *FTDI232H) SoftConfigure(sleepingPoll bool) error {
+	// We need to open the device now so we can configure various property below.
+	err := f.OpenFirst()
+	if err != nil {
+		return err
+	}
+
+	// Change read & write buffers to maximum size
+	f.device.SetReadChunkSize(chunkSize)
+	f.device.SetWriteChunkSize(chunkSize)
+
+	// Pre allocate static read buffer size.
+	f.chunk = make([]byte, chunkSize)
+
+	f.SleepingPoll = sleepingPoll
+
+	f.device.SetBitmode(0xff, ftdi.ModeBitbang)
+
+	f.device.SetBaudrate(10000)
+
+	return nil
+}
+
 // Close shutdowns and reload any drivers
 func (f *FTDI232H) Close() error {
 	log.Println("FTDI232H closing device")
@@ -271,6 +295,11 @@ func (f *FTDI232H) OpenFirst() error {
 // ------------------------------------------------------------------------
 // GPIO
 // ------------------------------------------------------------------------
+
+// GetLevels gets the currently defined levels
+func (f *FTDI232H) GetLevels() uint16 {
+	return f.level
+}
 
 func (f *FTDI232H) setPin(pin gpio.Pin, mode gpio.IODirection) {
 	if mode == gpio.Input {
@@ -403,7 +432,7 @@ func (f *FTDI232H) Write(data []byte) (int, error) {
 	writtenCnt, err := f.device.Write(data)
 
 	if err != nil {
-		// log.Printf("FTDI232H Write failed: %v", err)
+		log.Printf("FTDI232H Write failed: %v", err)
 		return 0, err
 	}
 
@@ -442,6 +471,7 @@ func (f *FTDI232H) WriteLen(data []byte, length int) (int, error) {
 }
 
 // PollRead reads an expected number of bytes by polling for them.
+// This is a "bit-bang" type of read.
 // [timeout] is specified in seconds. If [timeout] == -1 then timeout = 10 seconds
 func (f *FTDI232H) PollRead(expected int, timeout int64) ([]byte, error) {
 	// Function to continuously poll reads on the FTDI device until an
@@ -467,8 +497,14 @@ func (f *FTDI232H) PollRead(expected int, timeout int64) ([]byte, error) {
 	// Loop calling read until the response chunk buffer is full or a timeout occurs.
 	for time.Now().Sub(start) <= duration {
 		// log.Println("FTDI232H reading device")
+		// NOTE: this takes about 400ms! to read pins!!
+		// t1 := time.Now()
 		bytesRead, err := f.device.Read(f.chunk)
+		// t2 := time.Since(t1)
+		// fmt.Printf("FTDI232H: PollRead: read chunk took %f\n", float32(t2)/1000000.0)
+
 		if err != nil {
+			log.Printf("FTDI232H read err (%v)\n", err)
 			return nil, err
 		}
 
@@ -501,9 +537,21 @@ func (f *FTDI232H) PollRead(expected int, timeout int64) ([]byte, error) {
 		}
 	}
 
-	msg := fmt.Sprintf("Timedout while polling for (%d) bytes!\n", expected)
+	msg := fmt.Sprintf("FTDI232H: PollRead: Timed out while polling for (%d) bytes!\n", expected)
 
 	return nil, errors.New(msg)
+}
+
+// PinsRead returns current state of pins (circumventing the read buffer).
+func (f *FTDI232H) PinsRead() (byte, error) {
+	pins, err := f.device.Pins()
+
+	if err != nil {
+		log.Printf("FTDI232H PinsRead err (%v)\n", err)
+		return byte(0), err
+	}
+
+	return pins, nil
 }
 
 // ------------------------------------------------------------------------

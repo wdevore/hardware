@@ -1,6 +1,7 @@
 package spi
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/wdevore/hardware/ftdi"
@@ -47,15 +48,23 @@ const NoChipSelectAssignment = 9999
 var writeCommand = []byte{0, 0, 0}
 var writeCommand2 = []byte{0, 0, 0, 0}
 
+const (
+	ReadCommand     = 0x20
+	TransferCommand = 0x30
+)
+
 // FtdiSPI is perspective of FTDI232H
 type FtdiSPI struct {
 	// SPI is-a protocol facilitated by FTDI232 device
 	ftdi *ftdi.FTDI232H
 
+	enableTrigger bool
+
 	// CSActiveLow is chip select active high(false) or low(true)
 	CSActiveLow        bool
 	chipSelect         gpio.Pin
 	hardwareControlled bool
+	manualChipSelect   bool
 	// ConstantCSAssert controls if CS is asserted on every read/write call or
 	// remains constant in an active state. For example, some devices have multiple
 	// slaves which means you want to assert on every call to make sure you are
@@ -121,6 +130,15 @@ func (spi *FtdiSPI) Configure(chipSelect gpio.Pin, maxSpeed int, mode CaptureMod
 
 	fi := spi.ftdi
 
+	// Set default pin states prior to SetMode()
+	fi.SetConfigPin(ftdi.D0, gpio.Output) // clk
+	fi.OutputLow(ftdi.D0)
+
+	if spi.enableTrigger {
+		fi.SetConfigPin(ftdi.D7, gpio.Output) // Trigger
+		fi.OutputHigh(ftdi.D7)
+	}
+
 	if !spi.hardwareControlled {
 		// log.Printf("SPI configuring chip select on pin (%d)\n", chipSelect)
 		fi.SetConfigPin(chipSelect, gpio.Output)
@@ -130,6 +148,7 @@ func (spi *FtdiSPI) Configure(chipSelect gpio.Pin, maxSpeed int, mode CaptureMod
 	// Initialize clock, mode, and bit order.
 	// log.Printf("SPI Setting clock speed to (%d)MHz\n", maxSpeed/1000000)
 	spi.SetClock(maxSpeed)
+
 	// log.Println("SPI Setting mode")
 	spi.SetMode(mode)
 
@@ -219,6 +238,9 @@ func (spi *FtdiSPI) SetBitOrder(order BitOrder) {
 // This is a Half-duplex SPI write.
 func (spi *FtdiSPI) Write(data []byte) error {
 	// Build command to write SPI data.
+	// writeCommand is the FTDI outer wrapper protocol. It won't appear
+	// on the output pins, it simply tells the ftdi chip about the
+	// data to be streamed out the MOSI pin.
 	writeCommand[0] = 0x10 | (byte(spi.bitOrder) << 3) | byte(spi.writeClockVE)
 	// logger.debug('SPI write with command {0:2X}.'.format(command))
 
@@ -229,26 +251,67 @@ func (spi *FtdiSPI) Write(data []byte) error {
 	writeCommand[1] = byte(length & 0xff)
 	writeCommand[2] = byte((length >> 8) & 0xff)
 
-	if !spi.ConstantCSAssert {
-		spi.AssertChipSelect()
+	// fmt.Printf("writing.....(%d)\n", writeCommand)
+	if !spi.manualChipSelect {
+		if !spi.ConstantCSAssert {
+			spi.AssertChipSelect() // typically low
+		}
 	}
 
 	// Send command and length.
+	// fmt.Printf("SPI: Send command: %0x\n", writeCommand)
 	_, err := spi.ftdi.Write(writeCommand)
 
 	if err != nil {
 		return err
 	}
 
+	// if !spi.ConstantCSAssert {
+	// 	spi.DeAssertChipSelect()
+	// }
+
+	// if !spi.ConstantCSAssert {
+	// 	spi.AssertChipSelect()
+	// }
 	// Send data.
+	// fmt.Printf("SPI: Send data: %0x\n", data)
+	// This is the data destine for the target device and will appear on
+	// the designated MOSI pin.
 	_, err = spi.ftdi.Write(data)
 	if err != nil {
 		return err
 	}
 
-	if !spi.ConstantCSAssert {
-		spi.DeAssertChipSelect()
+	if !spi.manualChipSelect {
+		if !spi.ConstantCSAssert {
+			spi.DeAssertChipSelect() // typically high
+		}
 	}
+	// fmt.Printf("wrote. (%d)\n", data)
+
+	return nil
+}
+
+// WriteByte writes a single plain byte
+func (spi *FtdiSPI) WriteByte(data byte) error {
+	if !spi.ConstantCSAssert {
+		spi.AssertChipSelect() // typically low
+	}
+
+	fmt.Printf("writing byte.....(%0x)\n", data)
+	// Send command and length.
+	// fmt.Printf("SPI: Send command: %0x\n", writeCommand)
+	_, err := spi.ftdi.WriteByte(data)
+
+	if err != nil {
+		fmt.Printf("SPI: Error writing byte: %v\n", err)
+		return err
+	}
+
+	if !spi.ConstantCSAssert {
+		spi.DeAssertChipSelect() // typically high
+	}
+	fmt.Printf("wrote byte. (%0x)\n", data)
 
 	return nil
 }
@@ -294,9 +357,9 @@ func (spi *FtdiSPI) WriteLen(data []byte, length int) error {
 
 // Half-duplex SPI read.  The specified length of bytes will be clocked
 // in the MISO line and returned as a bytearray object.
-func (spi *FtdiSPI) Read(length int) ([]byte, error) {
+func (spi *FtdiSPI) Read(length int, readCommand byte) ([]byte, error) {
 	// Build command to read SPI data.
-	writeCommand2[0] = 0x20 | (byte(spi.bitOrder) << 3) | (byte(spi.readClockVE) << 2)
+	writeCommand2[0] = ReadCommand | (byte(spi.bitOrder) << 3) | (byte(spi.readClockVE) << 2)
 	// logger.debug('SPI read with command {0:2X}.'.format(command))
 
 	// Compute length low and high bytes.
@@ -326,9 +389,10 @@ func (spi *FtdiSPI) Read(length int) ([]byte, error) {
 // Transfer is a Full-duplex SPI read and write.  The specified array of bytes will be
 // clocked out the MOSI line, while simultaneously bytes will be read from
 // the MISO line.  Read bytes will be returned as a bytearray object.
-func (spi *FtdiSPI) Transfer(data []byte) ([]byte, error) {
+// transferCommand could be a value of 0x30 for most devices.
+func (spi *FtdiSPI) Transfer(data []byte, transferCommand byte) ([]byte, error) {
 	// Build command to read and write SPI data.
-	writeCommand[0] = 0x30 | (byte(spi.bitOrder) << 3) | byte(spi.readClockVE<<2) | byte(spi.writeClockVE)
+	writeCommand[0] = TransferCommand | (byte(spi.bitOrder) << 3) | byte(spi.readClockVE<<2) | byte(spi.writeClockVE)
 	// logger.debug('SPI transfer with command {0:2X}.'.format(command))
 	// Compute length low and high bytes.
 	// NOTE: Must actually send length minus one because the MPSSE engine
@@ -347,20 +411,34 @@ func (spi *FtdiSPI) Transfer(data []byte) ([]byte, error) {
 	spi.Write(data)
 	spi.ftdi.WriteByte(0x87)
 
+	// Read response bytes.
+	response, err := spi.ftdi.PollRead(length, -1)
+
 	if !spi.ConstantCSAssert {
 		spi.DeAssertChipSelect()
 	}
 
-	// Read response bytes.
-	response, err := spi.ftdi.PollRead(length, -1)
-
+	if err != nil {
+		log.Printf("SPI: Transfer pollread failed on data (%v)\n", data)
+		log.Println(err)
+	}
 	return response, err
+}
+
+// TakeControlOfCS allows user to take control of CS
+func (spi *FtdiSPI) TakeControlOfCS() {
+	spi.manualChipSelect = true
+}
+
+// ReleaseControlOfCS allows user to return control back to SPI
+func (spi *FtdiSPI) ReleaseControlOfCS() {
+	spi.manualChipSelect = false
 }
 
 // AssertChipSelect will toggle chip select low or high depending on Active configuration
 func (spi *FtdiSPI) AssertChipSelect() {
-	if spi.chipSelect != gpio.NoPin {
-		// log.Println("SPI asserting chip select")
+	if spi.chipSelect != gpio.NoPin && spi.chipSelect != gpio.HardwarePin {
+		// log.Printf("SPI asserting chip select: active: %v", spi.CSActiveLow)
 		if spi.CSActiveLow {
 			spi.ftdi.OutputLow(spi.chipSelect)
 		} else {
@@ -371,8 +449,8 @@ func (spi *FtdiSPI) AssertChipSelect() {
 
 // DeAssertChipSelect will toggle chip select low or high depending on Active configuration
 func (spi *FtdiSPI) DeAssertChipSelect() {
-	if spi.chipSelect != gpio.NoPin {
-		// log.Println("SPI DE-asserting chip select")
+	if spi.chipSelect != gpio.NoPin && spi.chipSelect != gpio.HardwarePin {
+		// log.Printf("SPI DE-asserting chip select: active: %v", spi.CSActiveLow)
 		if spi.CSActiveLow {
 			spi.ftdi.OutputHigh(spi.chipSelect)
 		} else {
@@ -381,17 +459,24 @@ func (spi *FtdiSPI) DeAssertChipSelect() {
 	}
 }
 
+// ConfigurePins allows direct pins configurations
+func (spi *FtdiSPI) ConfigurePins(pins []gpio.PinConfiguration) {
+	spi.ftdi.ConfigPins(pins, true)
+}
+
 // ----------------------------------------------------------------------------------
 // Debug stuff
 // ----------------------------------------------------------------------------------
 
 // DebugInit configure debugging
-func (spi *FtdiSPI) DebugInit() {
-	spi.ftdi.SetConfigPin(ftdi.D7, gpio.Output) // Trigger
+func (spi *FtdiSPI) EnableTrigger() {
+	//spi.ftdi.SetConfigPin(ftdi.D7, gpio.Output) // Trigger
+	spi.enableTrigger = true
 }
 
 // TriggerPulse generate a timed pulse for various tools, ex Logic analyser.
 func (spi *FtdiSPI) TriggerPulse() {
+	// log.Println("SPI: Triggering pulse")
 	spi.ftdi.OutputHigh(ftdi.D7)
 	spi.ftdi.OutputLow(ftdi.D7)
 }
