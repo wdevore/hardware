@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ziutek/ftdi"
 )
@@ -40,8 +41,12 @@ func main() {
 
 	for !quit {
 		d.WriteByte(0x00 | 0x00)
+		println("off")
+		time.Sleep(time.Second)
 		// d.WriteByte(0x04 | 0x08)  // 00001100
-		d.WriteByte(0x03) // 00001100
+		println("On")
+		d.WriteByte(0x80)
+		time.Sleep(time.Second)
 		// d.WriteByte(byte(0x02))
 		// d.WriteByte(byte(0x04))
 	}

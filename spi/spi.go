@@ -386,6 +386,12 @@ func (spi *FtdiSPI) Read(length int, readCommand byte) ([]byte, error) {
 	return response, err
 }
 
+func (spi *FtdiSPI) SubmitTransfer(data []byte, transferCommand byte) ([]byte, error) {
+	transfer, err := spi.ftdi.SubmitRead(1)
+	println("transfer: ", transfer)
+	return nil, err
+}
+
 // Transfer is a Full-duplex SPI read and write.  The specified array of bytes will be
 // clocked out the MOSI line, while simultaneously bytes will be read from
 // the MISO line.  Read bytes will be returned as a bytearray object.
@@ -401,6 +407,8 @@ func (spi *FtdiSPI) Transfer(data []byte, transferCommand byte) ([]byte, error) 
 	length := len(data)
 	writeCommand[1] = byte((length - 1) & 0xff)
 	writeCommand[2] = byte(((length - 1) >> 8) & 0xff)
+	// writeCommand[1] = byte((length) & 0xff)
+	// writeCommand[2] = byte(((length) >> 8) & 0xff)
 
 	// Send command and length.
 	if !spi.ConstantCSAssert {
@@ -412,7 +420,7 @@ func (spi *FtdiSPI) Transfer(data []byte, transferCommand byte) ([]byte, error) 
 	spi.ftdi.WriteByte(0x87)
 
 	// Read response bytes.
-	response, err := spi.ftdi.PollRead(length, -1)
+	response, err := spi.ftdi.PollRead(length, 1)
 
 	if !spi.ConstantCSAssert {
 		spi.DeAssertChipSelect()

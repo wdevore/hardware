@@ -292,6 +292,26 @@ func (f *FTDI232H) OpenFirst() error {
 	return nil
 }
 
+// SetBitmode sets bit mode of device
+func (f *FTDI232H) SetBitmode(iomask byte, mode ftdi.Mode) error {
+	err := f.device.SetBitmode(iomask, mode)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SetBaudrate sets the transfer speed
+func (f *FTDI232H) SetBaudrate(baudRate int) error {
+	err := f.device.SetBaudrate(baudRate)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // ------------------------------------------------------------------------
 // GPIO
 // ------------------------------------------------------------------------
@@ -336,6 +356,12 @@ func (f *FTDI232H) SetConfigPin(pin gpio.Pin, mode gpio.IODirection) {
 	f.setPin(pin, mode)
 }
 
+// ConfigPinNoWrite sets the input or output mode for a specified pin
+// and does not write to pins
+func (f *FTDI232H) ConfigPinNoWrite(pin gpio.Pin, mode gpio.IODirection) {
+	f.setPin(pin, mode)
+}
+
 // ConfigPin sets the input or output mode for a specified pin.  Mode should be
 // either OUT or IN.
 func (f *FTDI232H) ConfigPin(pin gpio.Pin, mode gpio.IODirection) {
@@ -364,6 +390,18 @@ func (f *FTDI232H) SetPin(pin gpio.Pin, value gpio.PinState) {
 	} else {
 		f.level &= ^(1 << pin) & 0xffff
 	}
+}
+
+// SetPortDPins sets D0-D7 pins.
+func (f *FTDI232H) SetPortDPins(pins byte) {
+	// D0-D7 is the lower byte
+	f.level = (f.level & 0xFF00) | uint16(pins)
+}
+
+// SetPortCPins sets C0-C7 pins.
+func (f *FTDI232H) SetPortCPins(pins byte) {
+	// C0-C7 is the upper byte
+	f.level = (f.level & 0x00FF) | (uint16(pins) << 8)
 }
 
 // Output sets AND writes the specified pin to the provided high/low value.  Value should be
@@ -395,6 +433,11 @@ func (f *FTDI232H) SetLow(pin gpio.Pin) {
 	f.SetPin(pin, gpio.Low)
 }
 
+// WriteGPIO writes pin data to actual device.
+func (f *FTDI232H) WriteGPIO() error {
+	return f.mpsseWriteGpio()
+}
+
 // OutputPins takes an array of 16 States for output pins.
 // Note: depending on mode some States will have no effect.
 // func (f *FTDI232H) OutputPins(pins []State, write bool) {
@@ -419,12 +462,18 @@ func (f *FTDI232H) ReadInput(pin gpio.Pin) gpio.PinState {
 		return gpio.High
 	}
 	return gpio.Low
+}
 
+// ReadInputs returns all pin data as a 16bit value
+func (f *FTDI232H) ReadInputs() (pins gpio.Pins) {
+	inPins := f.mpsseReadGpio()
+	return inPins
 }
 
 // WriteByte wraps byte in a slice, then writes.
-func (f *FTDI232H) WriteByte(data byte) (int, error) {
-	return f.Write([]byte{data})
+func (f *FTDI232H) WriteByte(data byte) (cnt int, err error) {
+	cnt, err = f.Write([]byte{data})
+	return cnt, err
 }
 
 // Write writes out a byte array of size determined by the array
@@ -451,7 +500,7 @@ func (f *FTDI232H) Write(data []byte) (int, error) {
 // WriteLen allows writing of variable length fixed size arrays.
 // Reduces memory allocations
 func (f *FTDI232H) WriteLen(data []byte, length int) (int, error) {
-	writtenCnt, err := f.device.WriteLen(data, length)
+	writtenCnt, err := f.device.Write(data)
 
 	if err != nil {
 		// log.Printf("FTDI232H Write failed: %v", err)
@@ -468,6 +517,20 @@ func (f *FTDI232H) WriteLen(data []byte, length int) (int, error) {
 	// log.Printf("FTDI232H Wrote (%d) bytes\n", writtenCnt)
 
 	return writtenCnt, nil
+}
+
+// SubmitRead sumbits an int using Transfer
+func (f *FTDI232H) SubmitRead(expected int) (*ftdi.Transfer, error) {
+	transfer, err := f.device.SubmitRead(f.chunk)
+	println("Issusing done...")
+	result, err := transfer.Done()
+	if err != nil {
+		log.Printf("FTDI232H Done err (%v)\n", err)
+		return nil, err
+	}
+
+	println("Done: ", result)
+	return transfer, err
 }
 
 // PollRead reads an expected number of bytes by polling for them.
